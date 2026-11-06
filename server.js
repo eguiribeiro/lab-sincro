@@ -1,0 +1,25 @@
+'use strict';
+const http=require('node:http'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+const PORT=process.env.PORT||3000,HOST='0.0.0.0',DATA=process.env.DATA_FILE||path.join(__dirname,'data.json'),PUBLIC=path.join(__dirname,'public');
+const SLOTS=[['imp3d-09','Impressora 3D','09:00–10:00'],['imp3d-10','Impressora 3D','10:00–11:00'],['laser-09','Cortadora a laser','09:00–10:00'],['laser-10','Cortadora a laser','10:00–11:00'],['scanner-09','Scanner 3D','09:00–10:00'],['scanner-10','Scanner 3D','10:00–11:00']].map(([id,equipment,when])=>({id,equipment,when,day:'Hoje'}));
+let state={version:0,reservations:{},events:[]};try{if(fs.existsSync(DATA)){let p=JSON.parse(fs.readFileSync(DATA,'utf8'));if(p&&Number.isInteger(p.version)&&p.reservations&&Array.isArray(p.events))state=p}}catch(e){console.error(e)}
+const subscribers=new Set(),cache=new Map();
+const respond=(res,status,body)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(body))};
+function snapshot(){return {version:state.version,slots:SLOTS.map(s=>({...s,reservation:state.reservations[s.id]||null})),events:state.events.slice(0,12),online:subscribers.size}}
+function broadcast(){let data='event: state\ndata: '+JSON.stringify(snapshot())+'\n\n';for(let c of subscribers)try{c.write(data)}catch{ subscribers.delete(c)}}
+function record(type,meta={}){state.version++;state.events.unshift({id:crypto.randomUUID(),type,timestamp:new Date().toISOString(),...meta});state.events=state.events.slice(0,30);try{fs.writeFileSync(DATA+'.tmp',JSON.stringify(state));fs.renameSync(DATA+'.tmp',DATA)}catch(e){console.error('Persistencia',e.message)}broadcast()}
+function valid(s){return typeof s==='string'&&s.trim().length>=2&&s.trim().length<=90}
+function reserve(p){if(!SLOTS.some(s=>s.id===p.slotId)||!valid(p.name)||!valid(p.clientId))return [400,{error:'Informe nome, aparelho e horario validos.'}];if(p.requestId&&cache.has(p.requestId))return cache.get(p.requestId);
+let result;if(state.reservations[p.slotId])result=[409,{error:'Conflito: horario ja reservado por outro participante.',winner:state.reservations[p.slotId].name}];else{let reservation={id:crypto.randomUUID(),name:p.name.trim(),clientId:p.clientId,reservedAt:new Date().toISOString()};state.reservations[p.slotId]=reservation;record('reserve',{slotId:p.slotId,name:reservation.name});result=[201,{ok:true,reservation,version:state.version}]}if(p.requestId){if(cache.size>500)cache.clear();cache.set(p.requestId,result)}return result}
+function cancel(p){let r=state.reservations[p.slotId];if(!r)return [404,{error:'Reserva nao encontrada.'}];if(r.clientId!==p.clientId)return [403,{error:'Somente o aparelho que reservou pode cancelar.'}];delete state.reservations[p.slotId];record('cancel',{slotId:p.slotId,name:r.name});return [200,{ok:true}]}
+function readBody(req){return new Promise((ok,bad)=>{let b='';req.on('data',c=>{b+=c;if(b.length>8192){bad(Error('Requisicao grande demais'));req.destroy()}});req.on('end',()=>{try{ok(JSON.parse(b||'{}'))}catch{bad(Error('JSON invalido'))}});req.on('error',bad)})}
+const types={'.html':'text/html','.js':'application/javascript','.css':'text/css'};
+const server=http.createServer(async(req,res)=>{let pathname;try{pathname=new URL(req.url,'http://localhost').pathname}catch{return respond(res,400,{error:'URL invalida'})}
+if(req.method==='GET'&&pathname==='/api/health')return respond(res,200,{ok:true});
+if(req.method==='GET'&&pathname==='/api/state')return respond(res,200,snapshot());
+if(req.method==='GET'&&pathname==='/api/events'){res.writeHead(200,{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache, no-transform','Connection':'keep-alive','X-Accel-Buffering':'no'});subscribers.add(res);res.write('retry: 1500\nevent: state\ndata: '+JSON.stringify(snapshot())+'\n\n');broadcast();let timer=setInterval(()=>{try{res.write(': ping\n\n')}catch{}},20000);req.on('close',()=>{clearInterval(timer);subscribers.delete(res);broadcast()});return}
+if(req.method==='POST'&&['/api/reserve','/api/cancel','/api/reset'].includes(pathname)){try{let p=await readBody(req);if(pathname==='/api/reset'){if(p.confirm!=='REINICIAR')return respond(res,400,{error:'Confirmacao invalida.'});state.reservations={};record('reset');return respond(res,200,{ok:true})}let [status,body]=pathname==='/api/reserve'?reserve(p):cancel(p);return respond(res,status,body)}catch(e){return respond(res,400,{error:e.message})}}
+if(req.method!=='GET')return respond(res,405,{error:'Metodo nao permitido'});
+const file=path.resolve(PUBLIC,'.'+(pathname==='/'?'/index.html':pathname));if(!file.startsWith(PUBLIC+path.sep))return respond(res,403,{error:'Acesso negado'});
+fs.readFile(file,(err,b)=>{if(err)return respond(res,404,{error:'Nao encontrado'});res.writeHead(200,{'Content-Type':(types[path.extname(file)]||'application/octet-stream')+'; charset=utf-8','Cache-Control':'no-cache'});res.end(b)})});
+if(require.main===module)server.listen(PORT,HOST,()=>console.log('LabSincro na porta '+PORT));module.exports={server};
