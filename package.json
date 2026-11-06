@@ -1,1 +1,1 @@
-{"name":"lab-sincro","version":"1.0.0","private":true,"description":"Reservas de laboratorio em tempo real","scripts":{"start":"node server.js"},"engines":{"node":">=20"}}
+{"name":"lab-sincro","version":"1.0.0","private":true,"description":"Reservas de laboratorio em tempo real","scripts":{"start":"node server-v2.js"},"engines":{"node":">=20"}}
